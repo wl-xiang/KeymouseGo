@@ -99,8 +99,30 @@ jobs:
         working-directory: legacy-src
         run: |
           cp ../Mondrian.ico ./Mondrian.ico
-          # qt_material 的主题/模板文件不是自动收集的，需要 --collect-data
-          python -m PyInstaller -F -w --noconfirm --icon=Mondrian.ico --add-data './assets;assets' --collect-data qt_material KeymouseGo.py
+          cp ../.github/win7.spec.in ./win7.spec
+          # 使用固定 spec：
+          #  - 剔除构建机（Win10/Server）自带的 UCRT/VC 运行库，避免 Win7 上加载时报“找不到指定的程序”
+          #  - 只打入 PySide2/shiboken2 wheel 自带、兼容 Win7 的 VS2019 运行库和 python3.dll
+          #  - 收集 qt_material 主题/模板数据
+          python -m PyInstaller --noconfirm win7.spec
+
+      - name: Verify bundled Win7 runtime
+        shell: bash
+        working-directory: legacy-src
+        run: |
+          set -euo pipefail
+          python -m PyInstaller.utils.cliutils.archive_viewer -l -b dist/KeymouseGo.exe > archive_list.txt
+
+          for dll in concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_codecvt_ids.dll vcruntime140.dll vcruntime140_1.dll python3.dll; do
+            grep -qi "$dll$" archive_list.txt || { echo "ERROR: $dll is not bundled"; exit 1; }
+          done
+
+          if grep -qiE 'ucrtbase\.dll$|api-ms-win-.*\.dll$' archive_list.txt; then
+            echo "ERROR: build-host UCRT DLLs must not be bundled:"
+            grep -iE 'ucrtbase\.dll$|api-ms-win-.*\.dll$' archive_list.txt
+            exit 1
+          fi
+          echo "Runtime DLL check passed"
 
       - name: Package artifact
         shell: bash
@@ -142,5 +164,7 @@ jobs:
             echo "| Artifact | [下载产物](${{ steps.upload.outputs.artifact-url }}) |"
             echo ""
             echo "> Win7 运行要求：Windows 7 SP1 64 位，并安装 Universal C Runtime（KB2999226）。"
+            echo "> exe 已内置 PySide2 wheel 自带的 VS2019 VC++ 运行库，不再依赖构建机的 UCRT/VC 运行库。"
+            echo "> 若仍提示 DLL 加载失败，请安装 Microsoft Visual C++ 2015-2022 Redistributable (x64) 后重试。"
             echo "> Python 3.8 + Qt 5.15 是最后支持 Win7 的组合；v4.1 为旧版程序，插件与脚本能力与 v5 不通用。"
           } >> "$GITHUB_STEP_SUMMARY"

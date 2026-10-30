@@ -1,0 +1,146 @@
+# Win7 专用构建工作流。
+# 当前 v5 程序基于 PySide6（Qt 6），Qt 6 不支持 Win7；因此本工作流检出上游
+# KeymouseGo v4.1（最后一个基于 PySide2/Qt 5 的版本）的源码并打包成 exe。
+# 参考 release.yml，不修改 release.yml。
+
+name: build-win7
+
+on:
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: "Win7 兼容的 Python 版本（Python 3.9+ 已不支持 Win7；推荐 3.8）"
+        required: true
+        type: choice
+        default: "3.8"
+        options:
+          - "3.6"
+          - "3.7"
+          - "3.8"
+
+permissions:
+  contents: read
+
+jobs:
+  build-win7:
+    name: Win7 exe (Qt5/PySide2, Python ${{ inputs.python-version }})
+    # 使用 windows-2022：对 Python 3.6/3.7 等旧解释器的支持比 windows-latest 稳定
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      LEGACY_REPO: taojy123/KeymouseGo
+      LEGACY_REF: v4.1
+      LEGACY_VERSION: v4.1
+      PY_VER: ${{ inputs.python-version }}
+    steps:
+      - name: Checkout current repo (for icon)
+        uses: actions/checkout@v4
+
+      - name: Checkout legacy Qt5 source (${{ env.LEGACY_VERSION }})
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LEGACY_REPO }}
+          ref: ${{ env.LEGACY_REF }}
+          path: legacy-src
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          architecture: x64
+
+      - name: Install legacy dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # v4.1 原始依赖见 legacy-src/requirements.txt（PySide2 5.15.2.1）。
+          # 旧 Python 版本需要相应降级可安装的依赖：
+          #  - PySide2 5.15.2.1 覆盖 cp36~cp310，是 Qt 5.15 LTS（支持 Win7）的最后一个版本
+          #  - qt-material 2.10+ 要求 Python >= 3.7，3.6 只能用 2.7
+          #  - pyWinhook 1.6.2 无 cp36 wheel，3.6 用 1.6.1
+          #  - PyInstaller 新版要求 Python >= 3.8；3.6 用 4.10，3.7/3.8 用 5.13.2（bootloader 以 Win7 为目标）
+          case "$PY_VER" in
+            3.6)
+              PIP_DEPS=(pip==21.3.1 setuptools==59.6.0 wheel==0.37.1)
+              APP_DEPS=(PySide2==5.15.2.1 qt-material==2.7 pywin32==302 pyWinhook==1.6.1 pyperclip==1.8.0 playsound==1.2.2 future==0.18.3)
+              PYINSTALLER_VER="4.10"
+              QTMATERIAL_VER="2.7"
+              ;;
+            3.7)
+              PIP_DEPS=(pip==23.3.2 setuptools==67.8.0 wheel==0.41.2)
+              APP_DEPS=(PySide2==5.15.2.1 qt-material==2.11 pywin32==302 pyWinhook==1.6.2 pyperclip==1.8.0 playsound==1.2.2 future==0.18.3)
+              PYINSTALLER_VER="5.13.2"
+              QTMATERIAL_VER="2.11"
+              ;;
+            3.8)
+              PIP_DEPS=(pip==24.3.1)
+              APP_DEPS=(PySide2==5.15.2.1 qt-material==2.11 pywin32==302 pyWinhook==1.6.2 pyperclip==1.8.0 playsound==1.2.2 future==0.18.3)
+              PYINSTALLER_VER="5.13.2"
+              QTMATERIAL_VER="2.11"
+              ;;
+            *)
+              echo "Unsupported Python for Win7: $PY_VER" >&2
+              exit 1
+              ;;
+          esac
+
+          python -m pip install --upgrade "${PIP_DEPS[@]}"
+          python -m pip install "${APP_DEPS[@]}" "pyinstaller==$PYINSTALLER_VER"
+
+          {
+            echo "PYSIDE2_VER=5.15.2.1"
+            echo "PYINSTALLER_VER=$PYINSTALLER_VER"
+            echo "QTMATERIAL_VER=$QTMATERIAL_VER"
+          } >> "$GITHUB_ENV"
+
+      - name: Bundle legacy packages (Qt5)
+        shell: bash
+        working-directory: legacy-src
+        run: |
+          cp ../Mondrian.ico ./Mondrian.ico
+          # qt_material 的主题/模板文件不是自动收集的，需要 --collect-data
+          python -m PyInstaller -F -w --noconfirm --icon=Mondrian.ico --add-data './assets;assets' --collect-data qt_material KeymouseGo.py
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp "legacy-src/dist/KeymouseGo.exe" "artifact/KeymouseGo_${LEGACY_VERSION}-qt5-win7-py${PY_VER}.exe"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeymouseGo-win7-qt5-py${{ inputs.python-version }}
+          path: artifact/KeymouseGo*-win7-py${{ inputs.python-version }}.exe
+          if-no-files-found: error
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="artifact/KeymouseGo_${LEGACY_VERSION}-qt5-win7-py${PY_VER}.exe"
+          PY_ACTUAL="$(python -c 'import platform; print(platform.python_version())')"
+          QT_ACTUAL="$(python -c 'from PySide2.QtCore import qVersion; print(qVersion())')"
+          SIZE="$(du -h "$EXE" | cut -f1)"
+          SHA256="$(sha256sum "$EXE" | cut -d' ' -f1)"
+
+          {
+            echo "## KeymouseGo Win7 构建结果（Qt5/PySide2）"
+            echo ""
+            echo "| 项目 | 内容 |"
+            echo "| --- | --- |"
+            echo "| 程序版本 | ${LEGACY_VERSION}（源码：${LEGACY_REPO}@${LEGACY_REF}） |"
+            echo "| UI 框架 | PySide2 ${PYSIDE2_VER}（Qt ${QT_ACTUAL}，qt-material ${QTMATERIAL_VER}） |"
+            echo "| 构建 Python | ${PY_VER}（实际：${PY_ACTUAL}） |"
+            echo "| 目标平台 | Windows 7 SP1 64 位（同时兼容 Win8.1 / Win10 / Win11） |"
+            echo "| PyInstaller | ${PYINSTALLER_VER} |"
+            echo "| 产物文件 | \`KeymouseGo_${LEGACY_VERSION}-qt5-win7-py${PY_VER}.exe\` |"
+            echo "| 文件大小 | ${SIZE} |"
+            echo "| SHA256 | \`${SHA256}\` |"
+            echo "| Artifact | [下载产物](${{ steps.upload.outputs.artifact-url }}) |"
+            echo ""
+            echo "> Win7 运行要求：Windows 7 SP1 64 位，并安装 Universal C Runtime（KB2999226）。"
+            echo "> Python 3.8 + Qt 5.15 是最后支持 Win7 的组合；v4.1 为旧版程序，插件与脚本能力与 v5 不通用。"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,89 @@
+# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller spec for KeymouseGo v4.1 (PySide2/Qt 5.15) on Windows 7.
+#
+# Why this spec is needed:
+# - PyInstaller collects UCRT/VC runtime DLLs (ucrtbase.dll, api-ms-win-crt-*.dll,
+#   msvcp140*.dll, vcruntime140*.dll, ...) from the build host. On windows-2022
+#   (Windows 10/Server), those DLLs are not Windows 7 compatible, and loading
+#   them on Win7 fails with "DLL load failed: The specified procedure could not
+#   be found" while importing shiboken2.
+# - Remove all build-host runtime DLLs from the bundle; Windows 7 provides the
+#   UCRT through KB2999226 (Python 3.8 itself already requires the UCRT).
+# - Add the VC++ runtime DLLs shipped inside the PySide2/shiboken2 wheel, which
+#   were built with VS2019 and are Windows 7 compatible.
+
+import os
+import re
+import sys
+import shiboken2
+from PyInstaller.building.datastruct import TOC
+from PyInstaller.utils.hooks import collect_data_files
+
+SHIBOKEN_DIR = os.path.dirname(shiboken2.__file__)
+PYTHON3_DLL = os.path.join(os.path.dirname(sys.executable), 'python3.dll')
+
+VC_RUNTIME_DLLS = [
+    'concrt140.dll',
+    'msvcp140.dll',
+    'msvcp140_1.dll',
+    'msvcp140_2.dll',
+    'msvcp140_codecvt_ids.dll',
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+]
+
+SYSTEM_DLL_RE = re.compile(
+    r'^(ucrtbase\.dll'
+    r'|api-ms-win-.*\.dll'
+    r'|python3\.dll'
+    r'|(?:concrt140|msvcp140.*|vcruntime140.*|vccorlib140|vcamp140|vcomp140)\.dll)$',
+    re.IGNORECASE,
+)
+
+a = Analysis(
+    ['KeymouseGo.py'],
+    pathex=[],
+    binaries=[],
+    datas=collect_data_files('qt_material') + [('assets', 'assets')],
+    hiddenimports=[],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+)
+
+# Drop runtime DLLs that PyInstaller picked up from the build host.
+filtered_binaries = [
+    entry for entry in a.binaries
+    if not SYSTEM_DLL_RE.match(os.path.basename(entry[0]))
+]
+
+# Add the Win7-compatible VC++ runtime from the PySide2/shiboken2 wheel.
+for name in VC_RUNTIME_DLLS:
+    src = os.path.join(SHIBOKEN_DIR, name)
+    if os.path.exists(src):
+        filtered_binaries.append((name, src, 'BINARY'))
+
+# shiboken2.abi3.dll links against python3.dll (stable ABI shim); make sure
+# the correct one from the build Python installation is bundled at top level.
+if os.path.exists(PYTHON3_DLL):
+    filtered_binaries.append(('python3.dll', PYTHON3_DLL, 'BINARY'))
+
+a.binaries = TOC(filtered_binaries)
+
+pyz = PYZ(a.pure, a.zipped_data)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='KeymouseGo',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    icon='Mondrian.ico',
+)

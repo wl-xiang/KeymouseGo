@@ -1,0 +1,156 @@
+# 手动触发的 Windows 构建工作流（不修改 release.yml，独立参考实现）。
+# 通过 workflow_dispatch 选择目标机器使用的 Python 版本，直接产出打包好的 exe，
+# 并把构建信息写入 GitHub Actions Job Summary。
+
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: "目标运行机器的 Python 版本（3.6~3.8 为旧系统兼容组合，3.9~3.11 为 Win10/Win11 组合）"
+        required: true
+        type: choice
+        default: "3.10"
+        options:
+          - "3.6"
+          - "3.7"
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows exe (Python ${{ inputs.python-version }})
+    # 使用 windows-2022：对 Python 3.6/3.7 等旧解释器的支持比 windows-latest 稳定
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      KEYMOUSEGO_VERSION: _v5_2_1
+      PY_VER: ${{ inputs.python-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          architecture: x64
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 不同 Python 版本可用的依赖版本不同，按版本选择能装上 wheel 的组合：
+          #  - PySide6 6.5.3 要求 Python >= 3.7，3.6 只能用 6.2.4
+          #  - qt-material 2.10+ 要求 Python >= 3.7，3.6 只能用 2.7
+          #  - pyWinhook 1.6.2 无 cp36 wheel，3.6 用 1.6.1
+          #  - pywin32 302 覆盖 cp36~cp310，3.11 用 306
+          #  - PyInstaller 新版要求 Python >= 3.8；3.6 用 4.10，3.7/3.8 用 5.13.2
+          case "$PY_VER" in
+            3.6)
+              PIP_DEPS=(pip==21.3.1 setuptools==59.6.0 wheel==0.37.1)
+              APP_DEPS=(dataclasses==0.8 PySide6==6.2.4 qt-material==2.7 pywin32==302 pyWinhook==1.6.1 pyperclip==1.8.0 future==0.18.3 loguru==0.6.0 json5==0.9.10)
+              PYINSTALLER_VER="4.10"
+              PYSIDE_VER="6.2.4"
+              PYWIN32_VER="302"
+              TARGET_OS="Win7/Win8.1 旧系统（Python 3.6；Qt6 仍需 Win10+）"
+              ;;
+            3.7)
+              PIP_DEPS=(pip==23.3.2 setuptools==67.8.0 wheel==0.41.2)
+              APP_DEPS=(PySide6==6.5.3 qt-material==2.11 pywin32==302 pyWinhook==1.6.2 pyperclip==1.8.0 future==0.18.3 loguru==0.6.0 json5==0.9.10)
+              PYINSTALLER_VER="5.13.2"
+              PYSIDE_VER="6.5.3"
+              PYWIN32_VER="302"
+              TARGET_OS="Win7/Win8.1/Win10（Python 3.7；Qt6 仍需 Win10+）"
+              ;;
+            3.8)
+              PIP_DEPS=(pip==24.3.1)
+              APP_DEPS=(PySide6==6.5.3 qt-material==2.11 pywin32==302 pyWinhook==1.6.2 pyperclip==1.8.0 future==0.18.3 loguru==0.6.0 json5==0.9.10)
+              PYINSTALLER_VER="5.13.2"
+              PYSIDE_VER="6.5.3"
+              PYWIN32_VER="302"
+              TARGET_OS="Win7 SP1/Win10/Win11（Python 3.8 为最后支持 Win7 的解释器；Qt6 仍需 Win10+）"
+              ;;
+            3.9|3.10)
+              PIP_DEPS=(pip)
+              APP_DEPS=(PySide6==6.5.3 qt-material==2.11 pywin32==302 pyWinhook==1.6.2 pyperclip==1.8.0 future==0.18.3 loguru==0.6.0 json5==0.9.10)
+              PYINSTALLER_VER="6.11.1"
+              PYSIDE_VER="6.5.3"
+              PYWIN32_VER="302"
+              TARGET_OS="Windows 10 1809+ / Windows 11"
+              ;;
+            3.11)
+              PIP_DEPS=(pip)
+              APP_DEPS=(PySide6==6.5.3 qt-material==2.11 pywin32==306 pyWinhook==1.6.2 pyperclip==1.8.0 future==0.18.3 loguru==0.6.0 json5==0.9.10)
+              PYINSTALLER_VER="6.11.1"
+              PYSIDE_VER="6.5.3"
+              PYWIN32_VER="306"
+              TARGET_OS="Windows 10 1809+ / Windows 11"
+              ;;
+            *)
+              echo "Unsupported python version: $PY_VER" >&2
+              exit 1
+              ;;
+          esac
+
+          python -m pip install --upgrade "${PIP_DEPS[@]}"
+          python -m pip install "${APP_DEPS[@]}" "pyinstaller==$PYINSTALLER_VER"
+
+          {
+            echo "PYSIDE_VER=$PYSIDE_VER"
+            echo "PYINSTALLER_VER=$PYINSTALLER_VER"
+            echo "PYWIN32_VER=$PYWIN32_VER"
+            echo "TARGET_OS=$TARGET_OS"
+          } >> "$GITHUB_ENV"
+
+      - name: Bundle Packages
+        shell: bash
+        run: |
+          python -m PyInstaller -F -w --noconfirm --icon=Mondrian.ico --add-data './assets;assets' KeymouseGo.py
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp dist/KeymouseGo.exe "artifact/KeymouseGo${KEYMOUSEGO_VERSION}-win-py${PY_VER}.exe"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeymouseGo-windows-py${{ inputs.python-version }}
+          path: artifact/KeymouseGo*-win-py${{ inputs.python-version }}.exe
+          if-no-files-found: error
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXE="artifact/KeymouseGo${KEYMOUSEGO_VERSION}-win-py${PY_VER}.exe"
+          PY_ACTUAL="$(python -c 'import platform; print(platform.python_version())')"
+          SIZE="$(du -h "$EXE" | cut -f1)"
+          SHA256="$(sha256sum "$EXE" | cut -d' ' -f1)"
+
+          {
+            echo "## KeymouseGo Windows 构建结果"
+            echo ""
+            echo "| 项目 | 内容 |"
+            echo "| --- | --- |"
+            echo "| 目标 Python 版本 | ${PY_VER}（实际构建：${PY_ACTUAL}） |"
+            echo "| 建议目标系统 | ${TARGET_OS} |"
+            echo "| 产物文件 | \`KeymouseGo${KEYMOUSEGO_VERSION}-win-py${PY_VER}.exe\` |"
+            echo "| 文件大小 | ${SIZE} |"
+            echo "| SHA256 | \`${SHA256}\` |"
+            echo "| 依赖组合 | PySide6 ${PYSIDE_VER} / pywin32 ${PYWIN32_VER} / PyInstaller ${PYINSTALLER_VER} |"
+            echo "| Artifact | [下载产物](${{ steps.upload.outputs.artifact-url }}) |"
+            echo ""
+            echo "> 注意：当前程序基于 PySide6（Qt 6），Qt 6 官方最低要求 Windows 10 1809。"
+            echo "> Python 3.6~3.8 只降低解释器层面的系统要求，Win7 实机运行需要改用 Qt5 分支的程序。"
+          } >> "$GITHUB_STEP_SUMMARY"
